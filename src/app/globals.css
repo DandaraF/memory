@@ -1,0 +1,62 @@
+@import "tailwindcss";
+
+@layer utilities {
+  .perspective-1000 {
+    perspective: 1000px;
+  }
+  .transform-style-3d {
+    transform-style: preserve-3d;
+  }
+  .backface-hidden {
+    backface-visibility: hidden;
+  }
+  .rotate-y-180 {
+    transform: rotateY(180deg);
+  }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0) rotateY(180deg); }
+  20%, 60% { transform: translateX(-8px) rotateY(180deg); }
+  40%, 80% { transform: translateX(8px) rotateY(180deg); }
+}
+
+@keyframes pulse-match {
+  0% { transform: scale(1) rotateY(180deg); }
+  50% { transform: scale(1.1) rotateY(180deg); filter: drop-shadow(0 0 15px rgba(59, 130, 246, 0.8)); }
+  100% { transform: scale(1) rotateY(180deg); }
+}
+
+.animate-shake {
+  animation: shake 0.4s ease-in-out;
+}
+
+.animate-match {
+  animation: pulse-match 0.5s ease-in-out;
+}
+
+/* Glassmorphic Cards & Backgrounds */
+.glass-panel {
+  background: rgba(15, 23, 42, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-card-back {
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.95));
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: inset 0 0 15px rgba(255, 255, 255, 0.05), 0 8px 20px rgba(0, 0, 0, 0.4);
+}
+
+.glass-card-front {
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.98));
+  border: 2px solid rgba(255, 255, 255, 0.2);
+}
+
+body {
+  background: radial-gradient(circle at 50% 0%, #1e1b4b 0%, #0f172a 50%, #020617 100%);
+  color: #f8fafc;
+  min-height: 100vh;
+  user-select: none;
+}
