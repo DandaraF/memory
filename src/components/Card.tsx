@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { memo } from 'react';
 import { CardItem } from '../types/game';
 
 interface CardProps {
@@ -9,7 +9,7 @@ interface CardProps {
   isMismatched?: boolean;
 }
 
-export const Card: React.FC<CardProps> = ({ card, onClick, isMismatched }) => {
+export const Card: React.FC<CardProps> = memo(({ card, onClick, isMismatched }) => {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
@@ -80,4 +80,6 @@ export const Card: React.FC<CardProps> = ({ card, onClick, isMismatched }) => {
       </div>
     </div>
   );
-};
+});
+
+Card.displayName = 'Card';
