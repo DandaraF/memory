@@ -1,6 +1,12 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, {
+  useReducer,
+  useCallback,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+} from 'react';
 import { Header } from '../components/Header';
 import { StatsBar } from '../components/StatsBar';
 import { Controls } from '../components/Controls';
@@ -8,304 +14,402 @@ import { GameBoard } from '../components/GameBoard';
 import { WinModal } from '../components/WinModal';
 import { CardItem, DifficultyId, GameStatus, ThemeId } from '../types/game';
 import { DIFFICULTIES } from '../lib/themes';
-import {
-  generateDeck,
-  calculateMatchScore,
-} from '../lib/gameLogic';
+import { generateDeck, calculateMatchScore } from '../lib/gameLogic';
 import { soundFx } from '../lib/audio';
 
+// ─── Storage helpers ──────────────────────────────────────────────────────────
+
+function loadBest(difficulty: DifficultyId) {
+  if (typeof window === 'undefined') return { score: null as number | null, time: null as number | null };
+  const s = localStorage.getItem(`memory_best_score_${difficulty}`);
+  const t = localStorage.getItem(`memory_best_time_${difficulty}`);
+  return { score: s ? parseInt(s, 10) : null, time: t ? parseInt(t, 10) : null };
+}
+
+function saveBest(difficulty: DifficultyId, score: number, time: number) {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(`memory_best_score_${difficulty}`, score.toString());
+  localStorage.setItem(`memory_best_time_${difficulty}`, time.toString());
+}
+
+// ─── State & Reducer ──────────────────────────────────────────────────────────
+
+interface GameState {
+  difficulty: DifficultyId;
+  theme: ThemeId;
+  cards: CardItem[];
+  flippedCards: CardItem[];
+  mismatchedCardIds: string[];
+  isProcessing: boolean;
+  gameStatus: GameStatus;
+  moves: number;
+  matches: number;
+  score: number;
+  combo: number;
+  maxCombo: number;
+  elapsedSeconds: number;
+  isMuted: boolean;
+  bestScore: number | null;
+  bestTime: number | null;
+  isNewBestScore: boolean;
+}
+
+type GameAction =
+  | { type: 'NEW_GAME'; difficulty: DifficultyId; theme: ThemeId }
+  | { type: 'START_PLAYING' }
+  | { type: 'FLIP_CARD'; card: CardItem }
+  | { type: 'MATCH'; symbolId: string; points: number; newCombo: number }
+  | { type: 'MISMATCH'; cardIds: [string, string] }
+  | { type: 'UNFLIP'; cardIds: [string, string] }
+  | { type: 'WIN'; finalScore: number; elapsed: number }
+  | { type: 'TICK' }
+  | { type: 'TOGGLE_MUTE' }
+  | { type: 'HINT_ON'; cardIds: string[] }
+  | { type: 'HINT_OFF'; cardIds: string[] }
+  | { type: 'HINT_PENALTY' }
+  | { type: 'SET_BEST'; score: number | null; time: number | null }
+  | { type: 'NEW_BEST'; score: number; time: number };
+
+function buildNewGameState(
+  difficulty: DifficultyId,
+  theme: ThemeId,
+  prev?: Partial<GameState>
+): Partial<GameState> {
+  const deck = generateDeck(difficulty, theme);
+  return {
+    difficulty,
+    theme,
+    cards: deck.map((c) => ({ ...c, isFlipped: true })),
+    flippedCards: [],
+    mismatchedCardIds: [],
+    isProcessing: true,
+    gameStatus: 'idle' as GameStatus,
+    moves: 0,
+    matches: 0,
+    score: 0,
+    combo: 0,
+    maxCombo: 0,
+    elapsedSeconds: 0,
+    isNewBestScore: false,
+    bestScore: prev?.bestScore ?? null,
+    bestTime: prev?.bestTime ?? null,
+  };
+}
+
+function createInitialState(): GameState {
+  return {
+    isMuted: false,
+    ...buildNewGameState('medium', 'space'),
+  } as GameState;
+}
+
+function gameReducer(state: GameState, action: GameAction): GameState {
+  switch (action.type) {
+    case 'NEW_GAME':
+      return { ...state, ...buildNewGameState(action.difficulty, action.theme, state) };
+
+    case 'START_PLAYING':
+      return {
+        ...state,
+        cards: state.cards.map((c) => ({ ...c, isFlipped: false })),
+        isProcessing: false,
+        gameStatus: 'playing',
+      };
+
+    case 'FLIP_CARD':
+      return {
+        ...state,
+        cards: state.cards.map((c) =>
+          c.id === action.card.id ? { ...c, isFlipped: true } : c
+        ),
+        flippedCards: [...state.flippedCards, action.card],
+        isProcessing: state.flippedCards.length === 1,
+      };
+
+    case 'MATCH': {
+      const newMatches = state.matches + 1;
+      const totalPairs = DIFFICULTIES[state.difficulty].pairs;
+      return {
+        ...state,
+        cards: state.cards.map((c) =>
+          c.symbolId === action.symbolId ? { ...c, isMatched: true } : c
+        ),
+        flippedCards: [],
+        isProcessing: false,
+        matches: newMatches,
+        combo: action.newCombo,
+        maxCombo: Math.max(state.maxCombo, action.newCombo),
+        score: state.score + action.points,
+        gameStatus: newMatches === totalPairs ? 'won' : 'playing',
+      };
+    }
+
+    case 'MISMATCH':
+      return { ...state, mismatchedCardIds: action.cardIds };
+
+    case 'UNFLIP':
+      return {
+        ...state,
+        cards: state.cards.map((c) =>
+          action.cardIds.includes(c.id) ? { ...c, isFlipped: false } : c
+        ),
+        flippedCards: [],
+        mismatchedCardIds: [],
+        isProcessing: false,
+        combo: 0,
+      };
+
+    case 'WIN':
+      return { ...state, gameStatus: 'won' };
+
+    case 'TICK':
+      return { ...state, elapsedSeconds: state.elapsedSeconds + 1 };
+
+    case 'TOGGLE_MUTE':
+      return { ...state, isMuted: !state.isMuted };
+
+    case 'HINT_ON':
+      return {
+        ...state,
+        cards: state.cards.map((c) =>
+          action.cardIds.includes(c.id) ? { ...c, isHighlighted: true } : c
+        ),
+      };
+
+    case 'HINT_OFF':
+      return {
+        ...state,
+        cards: state.cards.map((c) =>
+          action.cardIds.includes(c.id) ? { ...c, isHighlighted: false } : c
+        ),
+      };
+
+    case 'HINT_PENALTY':
+      return { ...state, score: Math.max(0, state.score - 30) };
+
+    case 'SET_BEST':
+      return { ...state, bestScore: action.score, bestTime: action.time };
+
+    case 'NEW_BEST':
+      return {
+        ...state,
+        bestScore: action.score,
+        bestTime: action.time,
+        isNewBestScore: true,
+      };
+
+    default:
+      return state;
+  }
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export default function Home() {
-  const [difficulty, setDifficulty] = useState<DifficultyId>('medium');
-  const [theme, setTheme] = useState<ThemeId>('space');
-
-  const [cards, setCards] = useState<CardItem[]>([]);
-  const [flippedCards, setFlippedCards] = useState<CardItem[]>([]);
-  const [mismatchedCardIds, setMismatchedCardIds] = useState<string[]>([]);
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
-
-  const [gameStatus, setGameStatus] = useState<GameStatus>('idle');
-  const [moves, setMoves] = useState<number>(0);
-  const [matches, setMatches] = useState<number>(0);
-  const [score, setScore] = useState<number>(0);
-  const [combo, setCombo] = useState<number>(0);
-  const [maxCombo, setMaxCombo] = useState<number>(0);
-  const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
-
-  const [isMuted, setIsMuted] = useState<boolean>(false);
-  const [bestScore, setBestScore] = useState<number | null>(null);
-  const [bestTime, setBestTime] = useState<number | null>(null);
-  const [isNewBestScore, setIsNewBestScore] = useState<boolean>(false);
+  const [state, dispatch] = useReducer(gameReducer, undefined, createInitialState);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
-  const previewTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const previewRef = useRef<NodeJS.Timeout | null>(null);
+  // Stable refs for values needed inside callbacks/timeouts
+  const elapsedRef = useRef(0);
+  const difficultyRef = useRef<DifficultyId>('medium');
+  const themeRef = useRef<ThemeId>('space');
 
-  // Load high score from localStorage on mount & when difficulty changes
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const savedScore = localStorage.getItem(`memory_best_score_${difficulty}`);
-      const savedTime = localStorage.getItem(`memory_best_time_${difficulty}`);
-      setBestScore(savedScore ? parseInt(savedScore, 10) : null);
-      setBestTime(savedTime ? parseInt(savedTime, 10) : null);
+  // Sync refs after render (not during) via useLayoutEffect
+  useLayoutEffect(() => {
+    elapsedRef.current = state.elapsedSeconds;
+    difficultyRef.current = state.difficulty;
+    themeRef.current = state.theme;
+  });
+
+  const stopTimer = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
     }
-  }, [difficulty]);
+  }, []);
 
-  // Start initial game
-  const initGame = useCallback(
-    (diffId: DifficultyId = difficulty, themeId: ThemeId = theme) => {
-      // Clear timers
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+  const startTimer = useCallback(() => {
+    stopTimer();
+    timerRef.current = setInterval(() => dispatch({ type: 'TICK' }), 1000);
+  }, [stopTimer]);
 
-      const deck = generateDeck(diffId, themeId);
-      setCards(deck);
-      setFlippedCards([]);
-      setMismatchedCardIds([]);
-      setIsProcessing(true);
+  const startNewGame = useCallback(
+    (difficulty: DifficultyId, theme: ThemeId) => {
+      stopTimer();
+      if (previewRef.current) clearTimeout(previewRef.current);
 
-      setMoves(0);
-      setMatches(0);
-      setScore(0);
-      setCombo(0);
-      setMaxCombo(0);
-      setElapsedSeconds(0);
-      setIsNewBestScore(false);
+      const best = loadBest(difficulty);
+      dispatch({ type: 'NEW_GAME', difficulty, theme });
+      dispatch({ type: 'SET_BEST', score: best.score, time: best.time });
 
-      // Brief card preview on startup
-      const previewTime = DIFFICULTIES[diffId].previewTimeMs;
-      
-      // Temporarily flip all cards for preview
-      setCards((prevDeck) => prevDeck.map((c) => ({ ...c, isFlipped: true })));
-      setGameStatus('idle');
-
-      previewTimerRef.current = setTimeout(() => {
-        setCards((prevDeck) => prevDeck.map((c) => ({ ...c, isFlipped: false })));
-        setIsProcessing(false);
-        setGameStatus('playing');
-      }, previewTime);
+      previewRef.current = setTimeout(() => {
+        dispatch({ type: 'START_PLAYING' });
+        startTimer();
+      }, DIFFICULTIES[difficulty].previewTimeMs);
     },
-    [difficulty, theme]
+    [stopTimer, startTimer]
   );
 
+  // Mount: load best score and start preview then game
   useEffect(() => {
-    initGame(difficulty, theme);
+    const best = loadBest('medium');
+    dispatch({ type: 'SET_BEST', score: best.score, time: best.time });
+
+    previewRef.current = setTimeout(() => {
+      dispatch({ type: 'START_PLAYING' });
+      startTimer();
+    }, DIFFICULTIES['medium'].previewTimeMs);
 
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      if (previewTimerRef.current) clearTimeout(previewTimerRef.current);
+      stopTimer();
+      if (previewRef.current) clearTimeout(previewRef.current);
     };
-  }, [initGame, difficulty, theme]);
+    // Intentional empty deps: runs only on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Timer interval effect
+  // Stop timer on win
   useEffect(() => {
-    if (gameStatus === 'playing') {
-      timerRef.current = setInterval(() => {
-        setElapsedSeconds((prev) => prev + 1);
-      }, 1000);
-    } else {
-      if (timerRef.current) clearInterval(timerRef.current);
+    if (state.gameStatus === 'won') {
+      stopTimer();
+      soundFx.playWin();
+
+      const finalScore = state.score;
+      const elapsed = elapsedRef.current;
+      const diff = difficultyRef.current;
+      const best = loadBest(diff);
+      if (finalScore > (best.score ?? 0)) {
+        saveBest(diff, finalScore, elapsed);
+        dispatch({ type: 'NEW_BEST', score: finalScore, time: elapsed });
+      }
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.gameStatus]);
 
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [gameStatus]);
+  // ── Card Click ──────────────────────────────────────────────────────────────
 
-  // Handle Card Click
-  const handleCardClick = (clickedCard: CardItem) => {
-    if (
-      isProcessing ||
-      gameStatus !== 'playing' ||
-      clickedCard.isFlipped ||
-      clickedCard.isMatched ||
-      flippedCards.length >= 2
-    ) {
-      return;
-    }
+  const handleCardClick = useCallback(
+    (clickedCard: CardItem) => {
+      if (
+        state.isProcessing ||
+        state.gameStatus !== 'playing' ||
+        clickedCard.isFlipped ||
+        clickedCard.isMatched ||
+        state.flippedCards.length >= 2
+      )
+        return;
 
-    soundFx.playFlip();
+      soundFx.playFlip();
+      dispatch({ type: 'FLIP_CARD', card: clickedCard });
 
-    // Flip the clicked card
-    const updatedCards = cards.map((c) =>
-      c.id === clickedCard.id ? { ...c, isFlipped: true } : c
-    );
-    setCards(updatedCards);
-
-    const newFlipped = [...flippedCards, clickedCard];
-    setFlippedCards(newFlipped);
-
-    // If 2 cards flipped, check for match
-    if (newFlipped.length === 2) {
-      setMoves((prev) => prev + 1);
-      setIsProcessing(true);
+      const newFlipped = [...state.flippedCards, clickedCard];
+      if (newFlipped.length < 2) return;
 
       const [card1, card2] = newFlipped;
 
       if (card1.symbolId === card2.symbolId) {
-        // MATCH!
         setTimeout(() => {
           soundFx.playMatch();
-          const newCombo = combo + 1;
-          setCombo(newCombo);
-          setMaxCombo((prevMax) => Math.max(prevMax, newCombo));
-
-          const matchPoints = calculateMatchScore(newCombo, difficulty);
-          setScore((prevScore) => prevScore + matchPoints);
-
-          setCards((prev) =>
-            prev.map((c) =>
-              c.symbolId === card1.symbolId ? { ...c, isMatched: true } : c
-            )
-          );
-
-          const newMatches = matches + 1;
-          setMatches(newMatches);
-          setFlippedCards([]);
-          setIsProcessing(false);
-
-          // Check Win Condition
-          const totalPairs = DIFFICULTIES[difficulty].pairs;
-          if (newMatches === totalPairs) {
-            handleWin(score + matchPoints);
-          }
+          const newCombo = state.combo + 1;
+          const points = calculateMatchScore(newCombo, difficultyRef.current);
+          dispatch({ type: 'MATCH', symbolId: card1.symbolId, points, newCombo });
         }, 300);
       } else {
-        // MISMATCH!
         setTimeout(() => {
           soundFx.playMismatch();
-          setCombo(0); // Reset combo chain
-          setMismatchedCardIds([card1.id, card2.id]);
+          dispatch({ type: 'MISMATCH', cardIds: [card1.id, card2.id] });
 
           setTimeout(() => {
-            setCards((prev) =>
-              prev.map((c) =>
-                c.id === card1.id || c.id === card2.id
-                  ? { ...c, isFlipped: false }
-                  : c
-              )
-            );
-            setMismatchedCardIds([]);
-            setFlippedCards([]);
-            setIsProcessing(false);
+            dispatch({ type: 'UNFLIP', cardIds: [card1.id, card2.id] });
           }, 600);
         }, 300);
       }
-    }
-  };
+    },
+    [state]
+  );
 
-  // Handle Win Event
-  const handleWin = (finalScore: number) => {
-    setGameStatus('won');
-    soundFx.playWin();
+  // ── Hint ────────────────────────────────────────────────────────────────────
 
-    if (typeof window !== 'undefined') {
-      const savedScore = localStorage.getItem(`memory_best_score_${difficulty}`);
-      const currentBest = savedScore ? parseInt(savedScore, 10) : 0;
+  const handleGiveHint = useCallback(() => {
+    if (state.isProcessing || state.gameStatus !== 'playing') return;
 
-      if (finalScore > currentBest) {
-        localStorage.setItem(`memory_best_score_${difficulty}`, finalScore.toString());
-        localStorage.setItem(`memory_best_time_${difficulty}`, elapsedSeconds.toString());
-        setBestScore(finalScore);
-        setBestTime(elapsedSeconds);
-        setIsNewBestScore(true);
-      }
-    }
-  };
+    const unmatched = state.cards.filter((c) => !c.isMatched && !c.isFlipped);
+    if (unmatched.length < 2) return;
 
-  // Toggle Sound
+    const pair = unmatched.filter((c) => c.symbolId === unmatched[0].symbolId);
+    if (pair.length !== 2) return;
+
+    const hintIds = pair.map((c) => c.id);
+    dispatch({ type: 'HINT_PENALTY' });
+    dispatch({ type: 'HINT_ON', cardIds: hintIds });
+
+    setTimeout(() => {
+      dispatch({ type: 'HINT_OFF', cardIds: hintIds });
+    }, 1200);
+  }, [state]);
+
+  // ── Sound ───────────────────────────────────────────────────────────────────
+
   const handleToggleSound = () => {
-    const nextMuted = !isMuted;
-    setIsMuted(nextMuted);
-    soundFx.setMuted(nextMuted);
+    dispatch({ type: 'TOGGLE_MUTE' });
+    soundFx.setMuted(!state.isMuted);
   };
 
-  // Give Hint: Briefly highlight an un-matched pair
-  const handleGiveHint = () => {
-    if (isProcessing || gameStatus !== 'playing') return;
+  // ── Derived values ──────────────────────────────────────────────────────────
 
-    // Find unmatched cards
-    const unmatchedCards = cards.filter((c) => !c.isMatched && !c.isFlipped);
-    if (unmatchedCards.length < 2) return;
-
-    // Select first unmatched symbol
-    const firstCard = unmatchedCards[0];
-    const matchingCards = unmatchedCards.filter(
-      (c) => c.symbolId === firstCard.symbolId
-    );
-
-    if (matchingCards.length === 2) {
-      setScore((prev) => Math.max(0, prev - 30)); // Small penalty for hint
-      const hintIds = matchingCards.map((c) => c.id);
-
-      setCards((prev) =>
-        prev.map((c) =>
-          hintIds.includes(c.id) ? { ...c, isHighlighted: true } : c
-        )
-      );
-
-      setTimeout(() => {
-        setCards((prev) =>
-          prev.map((c) =>
-            hintIds.includes(c.id) ? { ...c, isHighlighted: false } : c
-          )
-        );
-      }, 1200);
-    }
-  };
-
-  const totalPairs = DIFFICULTIES[difficulty].pairs;
+  const totalPairs = DIFFICULTIES[state.difficulty].pairs;
 
   return (
-    <main className="min-h-screen w-full px-4 py-6 flex flex-col justify-between items-center bg-radial-theme">
+    <main className="min-h-screen w-full px-4 py-6 flex flex-col justify-between items-center">
       <div className="w-full">
         <Header
-          isMuted={isMuted}
+          isMuted={state.isMuted}
           onToggleSound={handleToggleSound}
-          bestScore={bestScore}
-          bestTime={bestTime}
+          bestScore={state.bestScore}
+          bestTime={state.bestTime}
         />
 
         <StatsBar
-          moves={moves}
-          matches={matches}
+          moves={state.moves}
+          matches={state.matches}
           totalPairs={totalPairs}
-          score={score}
-          combo={combo}
-          elapsedSeconds={elapsedSeconds}
+          score={state.score}
+          combo={state.combo}
+          elapsedSeconds={state.elapsedSeconds}
         />
 
         <Controls
-          difficulty={difficulty}
-          theme={theme}
-          onSelectDifficulty={(d) => setDifficulty(d)}
-          onSelectTheme={(t) => setTheme(t)}
-          onNewGame={() => initGame(difficulty, theme)}
+          difficulty={state.difficulty}
+          theme={state.theme}
+          onSelectDifficulty={(d) => startNewGame(d, themeRef.current)}
+          onSelectTheme={(t) => startNewGame(difficultyRef.current, t)}
+          onNewGame={() => startNewGame(difficultyRef.current, themeRef.current)}
           onGiveHint={handleGiveHint}
-          isHintDisabled={isProcessing || gameStatus !== 'playing'}
+          isHintDisabled={state.isProcessing || state.gameStatus !== 'playing'}
         />
 
         <GameBoard
-          cards={cards}
-          difficulty={difficulty}
+          cards={state.cards}
+          difficulty={state.difficulty}
           onCardClick={handleCardClick}
-          mismatchedCardIds={mismatchedCardIds}
+          mismatchedCardIds={state.mismatchedCardIds}
         />
       </div>
 
-      {/* Footer */}
       <footer className="w-full text-center py-4 text-xs text-slate-500 font-medium mt-8 border-t border-white/5">
         Jogo da Memória • Desenvolvido com Next.js, React e Tailwind CSS
       </footer>
 
-      {/* Victory Modal */}
       <WinModal
-        isOpen={gameStatus === 'won'}
-        moves={moves}
-        score={score}
-        elapsedSeconds={elapsedSeconds}
+        isOpen={state.gameStatus === 'won'}
+        moves={state.moves}
+        score={state.score}
+        elapsedSeconds={state.elapsedSeconds}
         totalPairs={totalPairs}
-        maxCombo={maxCombo}
-        isNewBestScore={isNewBestScore}
-        onPlayAgain={() => initGame(difficulty, theme)}
+        maxCombo={state.maxCombo}
+        isNewBestScore={state.isNewBestScore}
+        onPlayAgain={() => startNewGame(difficultyRef.current, themeRef.current)}
       />
     </main>
   );
