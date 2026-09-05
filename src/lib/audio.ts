@@ -18,6 +18,23 @@ class SoundEffectsManager {
     }
   }
 
+  // Desbloqueia o contexto de áudio em uma interação do usuário (ex: clique na tela)
+  public unlockAudio() {
+    if (this.isMuted) return;
+    this.initCtx();
+    
+    // Cria um som mudo para forçar o desbloqueio real no iOS/Safari
+    if (this.ctx) {
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start();
+      osc.stop(this.ctx.currentTime + 0.001);
+    }
+  }
+
   public setMuted(muted: boolean) {
     this.isMuted = muted;
   }

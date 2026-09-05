@@ -62,7 +62,7 @@ type GameAction =
   | { type: 'MISMATCH'; cardIds: [string, string] }
   | { type: 'UNFLIP'; cardIds: [string, string] }
   | { type: 'WIN'; finalScore: number; elapsed: number }
-  | { type: 'TICK' }
+  | { type: 'SET_ELAPSED'; seconds: number }
   | { type: 'TOGGLE_MUTE' }
   | { type: 'HINT_ON'; cardIds: string[] }
   | { type: 'HINT_OFF'; cardIds: string[] }
@@ -162,8 +162,8 @@ function gameReducer(state: GameState, action: GameAction): GameState {
     case 'WIN':
       return { ...state, gameStatus: 'won' };
 
-    case 'TICK':
-      return { ...state, elapsedSeconds: state.elapsedSeconds + 1 };
+    case 'SET_ELAPSED':
+      return { ...state, elapsedSeconds: action.seconds };
 
     case 'TOGGLE_MUTE':
       return { ...state, isMuted: !state.isMuted };
@@ -208,7 +208,8 @@ function gameReducer(state: GameState, action: GameAction): GameState {
 export default function Home() {
   const [state, dispatch] = useReducer(gameReducer, undefined, createInitialState);
 
-  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const timerRef = useRef<number | null>(null);
+  const startTimeRef = useRef<number>(0);
   const previewRef = useRef<NodeJS.Timeout | null>(null);
   // Stable refs for values needed inside callbacks/timeouts
   const elapsedRef = useRef(0);
@@ -224,14 +225,27 @@ export default function Home() {
 
   const stopTimer = useCallback(() => {
     if (timerRef.current) {
-      clearInterval(timerRef.current);
+      cancelAnimationFrame(timerRef.current);
       timerRef.current = null;
     }
   }, []);
 
   const startTimer = useCallback(() => {
     stopTimer();
-    timerRef.current = setInterval(() => dispatch({ type: 'TICK' }), 1000);
+    startTimeRef.current = Date.now();
+    
+    const tick = () => {
+      const now = Date.now();
+      const elapsed = Math.floor((now - startTimeRef.current) / 1000);
+      
+      if (elapsed > elapsedRef.current) {
+        dispatch({ type: 'SET_ELAPSED', seconds: elapsed });
+      }
+      
+      timerRef.current = requestAnimationFrame(tick);
+    };
+    
+    timerRef.current = requestAnimationFrame(tick);
   }, [stopTimer]);
 
   const startNewGame = useCallback(
@@ -299,6 +313,8 @@ export default function Home() {
         state.flippedCards.length >= 2
       )
         return;
+
+      soundFx.unlockAudio(); // Unlock audio context on first interaction
 
       soundFx.playFlip();
       dispatch({ type: 'FLIP_CARD', card: clickedCard });
@@ -391,7 +407,6 @@ export default function Home() {
 
         <GameBoard
           cards={state.cards}
-          difficulty={state.difficulty}
           onCardClick={handleCardClick}
           mismatchedCardIds={state.mismatchedCardIds}
         />
